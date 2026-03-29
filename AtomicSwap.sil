@@ -1,0 +1,19 @@
+// Atomic Swap Covenant (Hashlock + Timelock)
+contract AtomicSwap(
+    pubkey initiator,      // original sender
+    pubkey recipient,      // counterparty
+    bytes32 hashLock,      // blake2b or sha256 of secret
+    int timeout            // absolute block time or relative
+) {
+    // Claim path: recipient provides correct secret + their signature
+    entrypoint function claim(bytes32 secret, sig recipientSig) {
+        require(sha256(secret) == hashLock);   // Verify the secret matches the hash
+        require(checkSig(recipientSig, recipient));
+    }
+
+    // Refund path: initiator reclaims after timeout
+    entrypoint function refund(sig initiatorSig) {
+        require(checkSig(initiatorSig, initiator));
+        require(tx.time >= timeout);           // timelock enforcement
+    }
+}
