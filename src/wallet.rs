@@ -94,6 +94,39 @@ fn derive_keypair(private_key: &[u8]) -> Result<(Vec<u8>, String), Box<dyn Error
     Ok((public_key_hash.to_vec(), address))
 }
 
+/// Phase 2 Step 2: UTXO and Fee Management
+
+#[derive(Debug, Clone)]
+pub struct UTXO {
+    pub txid: String,
+    pub index: u32,
+    pub amount: u64,
+    pub script: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UTXOSelection {
+    pub selected: Vec<UTXO>,
+    pub total_input: u64,
+    pub change: u64,
+    pub fee: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FeeEstimate {
+    pub tx_size_bytes: u64,
+    pub fee_rate_sompi_per_byte: u64,
+    pub total_fee: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransactionPlan {
+    pub inputs: Vec<UTXO>,
+    pub outputs: Vec<(String, u64)>, // (address, amount)
+    pub change_output: Option<(String, u64)>,
+    pub total_fee: u64,
+}
+
 /// Phase 2: Real Transaction Builder
 #[derive(Debug)]
 pub struct TransactionBuilder {
@@ -229,6 +262,71 @@ impl TransactionBuilder {
 
         tx_hex
     }
+
+    /// Select minimum UTXOs to cover amount + fees
+    pub fn select_utxos(
+        available: Vec<UTXO>,
+        amount: u64,
+        fee_rate: u64,
+    ) -> Result<UTXOSelection, String> {
+        if available.is_empty() {
+            return Err("No UTXOs available".to_string());
+        }
+
+        // Sort by amount (largest first)
+        let mut sorted = available.clone();
+        sorted.sort_by(|a, b| b.amount.cmp(&a.amount));
+
+        let mut selected = Vec::new();
+        let mut total_input: u64 = 0;
+
+        // Greedy selection: take largest UTXOs first
+        for utxo in sorted {
+            selected.push(utxo.clone());
+            total_input += utxo.amount;
+
+            // Estimate fee for current selection
+            let estimated_size = (148 * selected.len() + 34) as u64; // ~148 bytes per input + 34 per output
+            let estimated_fee = estimated_size * fee_rate;
+
+            if total_input >= amount + estimated_fee {
+                let change = total_input - amount - estimated_fee;
+                return Ok(UTXOSelection {
+                    selected,
+                    total_input,
+                    change,
+                    fee: estimated_fee,
+                });
+            }
+        }
+
+        Err(format!(
+            "Insufficient balance: need {}, have {}",
+            amount + (148 * selected.len() + 34) as u64 * fee_rate,
+            total_input
+        ))
+    }
+
+    /// Calculate fee for transaction
+    pub fn calculate_fees(tx_size_bytes: u64, fee_rate_sompi_per_byte: u64) -> FeeEstimate {
+        let total_fee = tx_size_bytes * fee_rate_sompi_per_byte;
+        FeeEstimate {
+            tx_size_bytes,
+            fee_rate_sompi_per_byte,
+            total_fee,
+        }
+    }
+
+    /// Estimate transaction size
+    pub fn estimate_tx_size(num_inputs: usize, num_outputs: usize) -> u64 {
+        // Fixed overhead: ~10 bytes
+        // Per input: ~148 bytes (txid + index + script + sequence)
+        // Per output: ~34 bytes (amount + script)
+        let overhead = 10u64;
+        let input_size = (num_inputs as u64) * 148;
+        let output_size = (num_outputs as u64) * 34;
+        overhead + input_size + output_size
+    }
 }
 
 impl Default for TransactionBuilder {
@@ -267,8 +365,81 @@ mod tests {
             .add_output(100000000, "76a914")
             .build_hex();
 
-        // Verify it produces valid hex
         assert!(tx_hex.len() > 0);
         assert!(tx_hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_utxo_selection() {
+        let utxos = vec![
+            UTXO {
+                txid: "tx1".to_string(),
+                index: 0,
+                amount: 500000000,
+                script: "script1".to_string(),
+            },
+            UTXO {
+                txid: "tx2".to_string(),
+                index: 0,
+                amount: 300000000,
+                script: "script2".to_string(),
+            },
+        ];
+
+        let selection = TransactionBuilder::select_utxos(utxos, 100000000, 1).unwrap();
+        assert_eq!(selection.selected.len(), 1);
+        assert!(selection.change > 0);
+        assert!(selection.total_input >= 100000000);
+    }
+
+    #[test]
+    fn test_utxo_selection_insufficient() {
+        let utxos = vec![UTXO {
+            txid: "tx1".to_string(),
+            index: 0,
+            amount: 50000000,
+            script: "script1".to_string(),
+        }];
+
+        let result = TransactionBuilder::select_utxos(utxos, 100000000, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fee_estimation() {
+        let size = TransactionBuilder::estimate_tx_size(1, 2);
+        assert!(size > 0);
+        assert!(size < 500);
+
+        let fee = TransactionBuilder::calculate_fees(size, 1);
+        assert_eq!(fee.total_fee, size);
+    }
+
+    #[test]
+    fn test_utxo_multiple_selection() {
+        let utxos = vec![
+            UTXO {
+                txid: "tx1".to_string(),
+                index: 0,
+                amount: 100000000,
+                script: "s1".to_string(),
+            },
+            UTXO {
+                txid: "tx2".to_string(),
+                index: 0,
+                amount: 150000000,
+                script: "s2".to_string(),
+            },
+            UTXO {
+                txid: "tx3".to_string(),
+                index: 0,
+                amount: 50000000,
+                script: "s3".to_string(),
+            },
+        ];
+
+        let selection = TransactionBuilder::select_utxos(utxos, 200000000, 2).unwrap();
+        assert!(selection.selected.len() > 1);
+        assert!(selection.total_input >= 200000000);
     }
 }

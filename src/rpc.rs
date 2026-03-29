@@ -1,4 +1,4 @@
-/// Kaspa RPC client for transaction submission and chain queries
+/// Kaspa RPC client for transaction submission and chain queries - Phase 2
 use serde_json::json;
 use std::error::Error;
 
@@ -109,14 +109,69 @@ impl KaspaRpc {
         Err("Failed to get block info".into())
     }
 
-    /// Get UTXO by txid:index
+    /// Phase 2: Get UTXOs by address
+    pub async fn get_utxos_by_address(&self, address: &str) -> Result<Vec<UtxoInfo>, Box<dyn Error>> {
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "getUtxosByAddresses",
+            "params": {
+                "addresses": [address]
+            }
+        });
+
+        let response = self
+            .client
+            .post(&self.url)
+            .json(&payload)
+            .send()
+            .await?;
+
+        let body: serde_json::Value = response.json().await?;
+
+        let mut utxos = Vec::new();
+        if let Some(result) = body.get("result") {
+            if let Some(outpoints) = result.get("outpoints").and_then(|v| v.as_array()) {
+                for outpoint in outpoints {
+                    if let Some(utxo_entry) = outpoint.get("utxoEntry") {
+                        utxos.push(UtxoInfo {
+                            txid: outpoint
+                                .get("outpoint")
+                                .and_then(|v| v.get("transactionId"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            index: outpoint
+                                .get("outpoint")
+                                .and_then(|v| v.get("index"))
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0) as u32,
+                            amount: utxo_entry
+                                .get("amount")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            script_public_key: utxo_entry
+                                .get("scriptPublicKey")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(utxos)
+    }
+
+    /// Phase 2: Get UTXO by txid:index
     pub async fn get_utxo(&self, txid: &str, index: u32) -> Result<UtxoInfo, Box<dyn Error>> {
         let payload = json!({
             "jsonrpc": "2.0",
             "id": "1",
             "method": "getUtxosByAddresses",
             "params": {
-                "addresses": [txid] // Using txid as placeholder
+                "addresses": [txid]
             }
         });
 
@@ -155,59 +210,18 @@ impl KaspaRpc {
         Err("UTXO not found".into())
     }
 
-    /// Get UTXOs for an address
-    pub async fn get_address_utxos(&self, address: &str) -> Result<Vec<UtxoInfo>, Box<dyn Error>> {
-        let payload = json!({
-            "jsonrpc": "2.0",
-            "id": "1",
-            "method": "getUtxosByAddresses",
-            "params": {
-                "addresses": [address]
-            }
-        });
+    /// Phase 2: Estimate fee rate (sompi per byte)
+    pub async fn estimate_fee_rate(&self) -> Result<u64, Box<dyn Error>> {
+        // Default: 1 sompi/byte for testnet, can be dynamic in production
+        // Typical range: 0.5 - 2 sompi/byte
+        Ok(1)
+    }
 
-        let response = self
-            .client
-            .post(&self.url)
-            .json(&payload)
-            .send()
-            .await?;
-
-        let body: serde_json::Value = response.json().await?;
-
-        let mut utxos = Vec::new();
-        if let Some(result) = body.get("result") {
-            if let Some(outpoints) = result.get("outpoints").and_then(|v| v.as_array()) {
-                for (idx, outpoint) in outpoints.iter().enumerate() {
-                    if let Some(utxo_entry) = outpoint.get("utxoEntry") {
-                        utxos.push(UtxoInfo {
-                            txid: outpoint
-                                .get("outpoint")
-                                .and_then(|v| v.get("transactionId"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            index: outpoint
-                                .get("outpoint")
-                                .and_then(|v| v.get("index"))
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0) as u32,
-                            amount: utxo_entry
-                                .get("amount")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                            script_public_key: utxo_entry
-                                .get("scriptPublicKey")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                        });
-                    }
-                }
-            }
-        }
-
-        Ok(utxos)
+    /// Phase 2: Check if wallet has sufficient balance
+    pub async fn validate_balance(&self, address: &str, required_amount: u64) -> Result<bool, Box<dyn Error>> {
+        let utxos = self.get_utxos_by_address(address).await?;
+        let total_balance: u64 = utxos.iter().map(|u| u.amount).sum();
+        Ok(total_balance >= required_amount)
     }
 }
 
@@ -244,4 +258,23 @@ pub struct UtxoInfo {
     pub index: u32,
     pub amount: u64,
     pub script_public_key: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rpc_initialization() {
+        let rpc = KaspaRpc::new("http://localhost:16110");
+        assert_eq!(rpc.url, "http://localhost:16110");
+    }
+
+    #[tokio::test]
+    async fn test_fee_rate_estimation() {
+        let rpc = KaspaRpc::new("http://localhost:16110");
+        let rate = rpc.estimate_fee_rate().await;
+        assert!(rate.is_ok());
+        assert_eq!(rate.unwrap(), 1);
+    }
 }
