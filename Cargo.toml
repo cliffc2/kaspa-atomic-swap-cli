@@ -33,3 +33,7 @@ thiserror = "1.0"
 
 # Async utilities
 futures = "0.3"
+
+# Phase 2: Real transaction support
+secp256k1 = { version = "0.28", features = ["recovery"] }
+rand = "0.8"
